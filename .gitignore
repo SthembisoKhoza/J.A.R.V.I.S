@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+database/memory.json
+database/memory_store/
+.DS_Store
