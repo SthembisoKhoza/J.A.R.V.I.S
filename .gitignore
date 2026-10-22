@@ -2,5 +2,6 @@
 __pycache__/
 *.pyc
 database/memory.json
+database/reminders.json
 database/memory_store/
 .DS_Store

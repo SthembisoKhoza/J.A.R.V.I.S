@@ -25,7 +25,8 @@ from main import WishMe, date, introduce, jokes, screenshot, time
 from main import activate_how_to_do_mode, hide, unhide
 from memory import add_memory, extract_remember_payload, get_all_memories, get_memory_context, init_memory
 from nim_client import get_nim_response
-from speech_engine import continue_speaking, should_ignore_query, speak, stop_speaking
+from reminders import handle_reminder, start_reminders
+from speech_engine import continue_speaking, publish, should_ignore_query, speak, stop_speaking
 from weather import weather
 
 
@@ -38,8 +39,15 @@ Commands you can type or say:
   wikipedia black holes
   search google for python tutorials
   play Duze by De Mthunda
-  play a song on Spotify
-  open notepad / chrome / edge / calculator / spotify
+  play
+  pause
+  next track
+  previous track
+  what is playing
+  open notepad / edge / spotify
+  allow Steam
+  remove Steam
+  what can you open
   close chrome
   increase volume / decrease volume / mute audio
   what is the cpu usage
@@ -47,6 +55,11 @@ Commands you can type or say:
   take screenshot
   remember that my name is ...
   what do you remember
+  timer for 10 minutes say I am studying
+  remind me to study at 13:00
+  set reminder to call Mom at 09:00
+  what are my reminders
+  cancel timer
   how to tie a tie
   help
   exit
@@ -146,6 +159,7 @@ def _clean_song(text: str) -> tuple[str, bool]:
 
 def _song_title(query: str) -> tuple[str, bool] | None:
     """Return (title, on_youtube). None when this is not a play command."""
+    query = _command_text(query)
     if query != "play" and not query.startswith("play "):
         return None
     return _clean_song(query)
@@ -159,9 +173,9 @@ def _play(query: str) -> bool:
     generic = {"", "a song", "song", "music", "something", "anything", "some music", "a track"}
     if title in generic:
         if title == "" and not on_youtube:
-            from pcautomati0n import resume_playback
+            from playback import media_play
 
-            resume_playback()
+            speak(media_play())
             return True
         speak("Which song should I play?")
         heard = listen().strip()
@@ -182,7 +196,7 @@ def _play(query: str) -> bool:
         return True
     from pcautomati0n import play_spotify_song
 
-    play_spotify_song(title)
+    speak(play_spotify_song(title))
     return True
 
 
@@ -195,6 +209,20 @@ def _simplify_command(query: str) -> str:
         if text.startswith(prefix):
             text = "open " + text[len(prefix) :]
     return text
+
+
+def _open_target(query: str) -> str:
+    """App name from 'open emails' or 'my whatsapp can you open it'."""
+    text = _simplify_command(_command_text(query))
+    for prefix in ("and ", "also ", "then "):
+        if text.startswith(prefix):
+            text = text[len(prefix) :].strip()
+    if text.startswith("open "):
+        return text[5:].strip()
+    if "open" not in text.split():
+        return ""
+    noise = {"open", "it", "up", "can", "you", "could", "and", "also", "for", "me", "app", "application"}
+    return " ".join(word for word in text.split() if word not in noise).strip()
 
 
 def _pc(query: str) -> bool:
@@ -213,22 +241,7 @@ def _pc(query: str) -> bool:
         "select all": pc.selectall,
         "copy this": pc.copy,
         "paste it here": pc.paste,
-        "open taskmanager": pc.taskmanager,
-        "open task manager": pc.taskmanager,
         "make a new folder here": pc.newfolder,
-        "open notepad": pc.notepad,
-        "open chrome": pc.chrome,
-        "open edge": pc.edge,
-        "open browser": pc.edge,
-        "open calculator": pc.calculator,
-        "open file explorer": pc.explorer,
-        "open vlc media player": pc.vlcmediaplayer,
-        "open epic games store": pc.epicgamesstore,
-        "open obs studio": pc.obsstudio,
-        "open blender": pc.blender,
-        "open tlauncher": pc.tlauncher,
-        "open opera": pc.opera,
-        "open spotify": pc.spotify,
         "switch the window": pc.switchthewindow,
         "increase volume": pc.volume_up,
         "decrease volume": pc.volume_down,
@@ -245,13 +258,162 @@ def _pc(query: str) -> bool:
         "close minecraft": pc.close_minecraft,
         "close vlc media player": pc.close_vlcmediaplayer,
     }
-    simplified = _simplify_command(query)
+    simplified = _simplify_command(_command_text(query))
     for phrase, action in actions.items():
         if phrase in simplified:
             action()
             return True
     if query in {"close this", "close this window"}:
         pc.close()
+        return True
+    target = _open_target(query)
+    if target and (simplified.startswith("open ") or _allowed_open(target)):
+        pc.open_named(target)
+        return True
+    return False
+
+
+def _allowed_open(name: str) -> bool:
+    try:
+        from apps import find_allowed
+    except Exception:
+        return False
+    return find_allowed(name) is not None
+
+
+def _command_text(query: str) -> str:
+    """Drop a polite prefix so 'can you pause' is the same command as 'pause'."""
+    text = " ".join(query.lower().split())
+    for prefix in ("can you ", "could you ", "please "):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+    if text.endswith(" please"):
+        text = text[: -len(" please")]
+    return " ".join(text.split())
+
+
+def _media(query: str) -> bool:
+    text = _command_text(query)
+    info = {
+        "what is playing",
+        "what's playing",
+        "whats playing",
+        "what is this song",
+        "what's this song",
+        "whats this song",
+        "what song is this",
+        "what song is playing",
+        "current track",
+        "current song",
+        "now playing",
+        "what is the current track",
+        "what track is this",
+    }
+    pause = {
+        "pause",
+        "pause music",
+        "pause the music",
+        "pause song",
+        "pause the song",
+        "pause playback",
+        "pause spotify",
+        "pause the track",
+    }
+    nxt = {
+        "next",
+        "next track",
+        "next song",
+        "skip",
+        "skip track",
+        "skip song",
+        "skip this",
+        "play next",
+        "play the next song",
+        "play next track",
+    }
+    previous = {
+        "previous",
+        "previous track",
+        "previous song",
+        "last track",
+        "go back",
+        "play previous",
+    }
+    play = {"play", "resume music", "resume playback", "resume the song", "resume the music"}
+    try:
+        if text in info:
+            from playback import current_track_sentence
+
+            speak(current_track_sentence())
+            return True
+        if text in pause:
+            from playback import media_pause
+
+            speak(media_pause())
+            return True
+        if text in nxt:
+            from playback import media_next
+
+            speak(media_next())
+            return True
+        if text in previous:
+            from playback import media_previous
+
+            speak(media_previous())
+            return True
+        if text in play:
+            from playback import media_play
+
+            speak(media_play())
+            return True
+    except Exception as exc:
+        print(f"[Playback] {exc}")
+        speak("I could not control playback.")
+        return True
+    return False
+
+
+def _apps(query: str) -> bool:
+    text = _command_text(query)
+    try:
+        from apps import allow_app, allowed_sentence, block_app
+    except Exception as exc:
+        print(f"[Apps] {exc}")
+        return False
+    if text in {
+        "what can you open",
+        "which apps can you open",
+        "what apps can you open",
+        "allowed apps",
+        "app list",
+        "what apps are allowed",
+    }:
+        speak(allowed_sentence())
+        return True
+    name = ""
+    action = ""
+    for prefix in ("allow ", "allow app ", "add app "):
+        if text.startswith(prefix):
+            action = "allow"
+            name = text[len(prefix) :].strip()
+            break
+    if not action and text.startswith("add ") and text.endswith(" to the allowlist"):
+        action = "allow"
+        name = text[len("add ") : -len(" to the allowlist")].strip()
+    if not action:
+        for prefix in ("remove ", "block ", "disallow "):
+            if text.startswith(prefix):
+                action = "block"
+                name = text[len(prefix) :].strip()
+                break
+    for suffix in (" from the allowlist", " from the list"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)].strip()
+    if action == "allow":
+        speak(allow_app(name))
+        return True
+    if action == "block":
+        speak(block_app(name))
         return True
     return False
 
@@ -270,8 +432,14 @@ def handle_query(query: str) -> str:
         speak("Goodbye.")
         return "exit"
 
-    if query in {"stop", "pause", "shut up"}:
+    if query in {"stop", "shut up", "stop talking"}:
         speak("Stopped.")
+        return ""
+
+    if _media(query):
+        return ""
+
+    if _apps(query):
         return ""
 
     if query in {"continue", "resume"}:
@@ -280,7 +448,7 @@ def handle_query(query: str) -> str:
         return ""
 
     if query in {"help", "what can you do", "commands"}:
-        print(HELP)
+        publish(HELP)
         speak("I can tell the time, check the weather, open programs, play music, and answer questions. The full list is on screen.")
         return ""
 
@@ -311,6 +479,9 @@ def handle_query(query: str) -> str:
             speak("I will remember that.")
         else:
             speak("I did not catch that.")
+        return ""
+
+    if handle_reminder(query):
         return ""
 
     if _asks_for_time(query):
@@ -410,6 +581,7 @@ def run() -> None:
         os.environ["JARVIS_INPUT"] = "voice"
     init_memory()
     WishMe()
+    start_reminders()
     print("Type 'help' for commands, or 'exit' to quit.")
     if os.environ.get("JARVIS_INPUT") == "voice":
         print("Voice is on. If the microphone fails, type the command instead.")
@@ -422,4 +594,9 @@ def run() -> None:
 
 
 if __name__ == "__main__":
-    run()
+    if "--cli" in sys.argv or "--voice" in sys.argv:
+        run()
+    else:
+        from jarvis_ui import launch
+
+        launch()

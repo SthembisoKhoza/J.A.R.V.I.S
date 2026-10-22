@@ -18,13 +18,14 @@ from dataclasses import dataclass
 import config  # noqa: F401  loads .env
 
 _LLM_MODE = os.getenv("JARVIS_LLM_MODE", "nim").lower()
-_NIM_MODEL_NAME = os.getenv("JARVIS_NIM_MODEL", "mistralai/mistral-7b-instruct-v0.3")
+_NIM_MODEL_NAME = os.getenv("JARVIS_NIM_MODEL", "meta/muse-glimmer-30b")
 _NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
 _SYSTEM_PROMPT = (
-    "You are JARVIS, a concise and practical AI assistant for desktop automation. "
-    "Prefer short, clear answers in plain text. Avoid markdown decoration and asterisks."
+    "You are JARVIS, a concise desktop assistant. "
+    "Answer in one or two short sentences."
 )
+_HISTORY: deque[dict[str, str]] = deque(maxlen=8)
 
 
 @dataclass
@@ -113,10 +114,10 @@ def _chat_reply(user_query: str) -> str:
         ("what can you do", "I can tell the time, check the weather, open programs, play music, and answer questions."),
         ("thank you", "You are welcome."),
         ("thanks", "You are welcome."),
-        ("good morning", "Good morning."),
-        ("good afternoon", "Good afternoon."),
-        ("good evening", "Good evening."),
-        ("good night", "Good night."),
+        ("good morning", "Good morning, sir."),
+        ("good afternoon", "Good afternoon, sir."),
+        ("good evening", "Good evening, sir."),
+        ("good night", "Good night, sir."),
         ("hello", "Hello. I am online and ready."),
         ("hi", "Hello. I am online and ready."),
         ("hey", "Hello. I am online and ready."),
@@ -201,6 +202,32 @@ def _offline_reply(user_query: str) -> str:
     return "I could not reach the language model. Check your network and try again."
 
 
+def _looks_like_scratchpad(text: str) -> bool:
+    lowered = text.lower()
+    markers = (
+        "do not think out loud",
+        "answer immediately",
+        "we need ",
+        "we must ",
+        "should ask clarification",
+        "no context",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _clean_reply(message: dict) -> str:
+    """Return the finished answer only. Never the hidden reasoning scratchpad."""
+    content = (message.get("content") or "").replace("*", "").strip()
+    if content and not _looks_like_scratchpad(content):
+        return content
+    reasoning = message.get("reasoning_content") or ""
+    if "Output:" in reasoning:
+        tail = reasoning.rsplit("Output:", 1)[-1].replace("*", "").strip().strip('"')
+        if tail and not _looks_like_scratchpad(tail):
+            return tail
+    return ""
+
+
 def _nim_reply(user_query: str, system_prompt: str) -> str:
     global _nim_blocked
     if _nim_blocked:
@@ -208,42 +235,50 @@ def _nim_reply(user_query: str, system_prompt: str) -> str:
     if not _rate_limiter.allow():
         return "I am getting too many questions at once. Give me a moment and ask again."
 
-    body = {
-        "model": _NIM_MODEL_NAME,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_query},
-        ],
-        "temperature": 0.6,
-        "top_p": 0.95,
-        "max_tokens": _rate_limiter.config.max_response_tokens,
-    }
-    request = urllib.request.Request(
-        _NIM_URL,
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {_api_key()}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        content = payload["choices"][0]["message"].get("content") or ""
-        text = content.replace("*", "").strip()
-        return text
-    except urllib.error.HTTPError as exc:
-        if exc.code in {401, 403, 410}:
-            _nim_blocked = True
-            print("[LLM] NVIDIA chat is unavailable. Answering locally.")
-        else:
-            print(f"[LLM] NVIDIA API returned HTTP {exc.code}")
-        return ""
-    except Exception as exc:
-        print(f"[LLM] {exc}")
-        return ""
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(_HISTORY)
+    messages.append({"role": "user", "content": user_query})
+    text = ""
+    for limit in (200, 360):
+        body = {
+            "model": _NIM_MODEL_NAME,
+            "messages": messages,
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "max_tokens": min(_rate_limiter.config.max_response_tokens, limit),
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        request = urllib.request.Request(
+            _NIM_URL,
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {_api_key()}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            message = payload["choices"][0].get("message") or {}
+            text = _clean_reply(message)
+            if text:
+                break
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403, 410}:
+                _nim_blocked = True
+                print("[LLM] NVIDIA chat is unavailable. Answering locally.")
+            else:
+                print(f"[LLM] NVIDIA API returned HTTP {exc.code}")
+            return ""
+        except Exception as exc:
+            print(f"[LLM] {exc}")
+            return ""
+    if text:
+        _HISTORY.append({"role": "user", "content": user_query})
+        _HISTORY.append({"role": "assistant", "content": text})
+    return text
 
 
 def get_nim_response(user_query: str, memory_context: str = "") -> str:

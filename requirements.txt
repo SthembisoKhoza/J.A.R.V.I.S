@@ -8,3 +8,4 @@ sounddevice>=0.5.0
 numpy>=2.0.0
 pyautogui>=0.9.54
 keyboard>=0.13.5
+pywebview>=5.0

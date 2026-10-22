@@ -10,10 +10,15 @@ MOD = "command" if IS_MAC else "ctrl"
 
 
 def _existing(paths: list[str]) -> str:
+    import shutil
+
     for path in paths:
         expanded = os.path.expandvars(path)
         if expanded and os.path.isfile(expanded):
             return expanded
+        found = shutil.which(expanded) if expanded else None
+        if found:
+            return found
     return ""
 
 
@@ -29,6 +34,360 @@ def _open_app(mac_app: str, win_path: str = "", extra: list[str] | None = None) 
         return
     subprocess.Popen(["cmd", "/c", "start", "", mac_app], shell=False)
     speak(f"Trying to open {mac_app}")
+
+
+_installed_apps = None
+
+
+def _skip_app(name: str) -> bool:
+    lowered = name.lower()
+    blocked = ("uninstall", "uninstaller", "readme", "documentation", "what's new", "release notes")
+    return any(word in lowered for word in blocked)
+
+
+def _installed_catalog() -> list[tuple[str, str, str]]:
+    """Return installed apps as (name, target, kind)."""
+    global _installed_apps
+    if _installed_apps is not None:
+        return _installed_apps
+
+    from pathlib import Path
+
+    catalog: list[tuple[str, str, str]] = []
+    roots = [
+        Path(os.environ.get("PROGRAMDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+        Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+        Path.home() / "Desktop",
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        for shortcut in root.rglob("*.lnk"):
+            if _skip_app(shortcut.stem):
+                continue
+            catalog.append((shortcut.stem, str(shortcut), "lnk"))
+
+    try:
+        listing = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                "Get-StartApps | ForEach-Object { $_.Name + \"`t\" + $_.AppID }",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+        )
+        for line in listing.stdout.splitlines():
+            if "\t" not in line:
+                continue
+            name, app_id = line.split("\t", 1)
+            name = name.strip()
+            app_id = app_id.strip()
+            if name and app_id and not _skip_app(name):
+                catalog.append((name, app_id, "store"))
+    except Exception as exc:
+        print(f"[PC] Could not list Start apps: {exc}")
+
+    _installed_apps = catalog
+    print(f"[PC] Found {len(catalog)} installed apps")
+    return catalog
+
+
+def _match_app(request: str):
+    query = " ".join(request.lower().split())
+    if not query:
+        return None
+    best = None
+    best_score = 0
+    for name, target, kind in _installed_catalog():
+        label = name.lower()
+        if query == label:
+            score = 100
+        elif label.startswith(query):
+            score = 85
+        elif all(word in label for word in query.split()):
+            score = 70
+        elif query in label:
+            score = 50
+        else:
+            score = 0
+        if score == 0:
+            continue
+        score += max(0, 15 - abs(len(label) - len(query)))
+        if kind == "lnk":
+            score += 2
+        if score > best_score:
+            best_score = score
+            best = (name, target, kind)
+    return best
+
+
+def _shortcut_target(path: str) -> tuple[str, str]:
+    """Return the program and arguments a Start menu shortcut points to."""
+    try:
+        listing = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                (
+                    "$s = (New-Object -ComObject WScript.Shell).CreateShortcut("
+                    f"'{path.replace(chr(39), chr(39)*2)}'); "
+                    "Write-Output $s.TargetPath; Write-Output $s.Arguments"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        lines = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+        if lines:
+            return lines[0], lines[1] if len(lines) > 1 else ""
+    except Exception as exc:
+        print(f"[PC] Could not read shortcut: {exc}")
+    return "", ""
+
+
+def _process_names() -> set[str]:
+    import psutil
+
+    names = set()
+    for proc in psutil.process_iter(["name"]):
+        name = (proc.info.get("name") or "").lower()
+        if name:
+            names.add(name)
+    return names
+
+
+def _running(names: list[str]) -> bool:
+    if not names:
+        return False
+    wanted = {name.lower() for name in names}
+    return bool(wanted & _process_names())
+
+
+def _wait_for_process(names: list[str], timeout: float = 8.0) -> bool:
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _running(names):
+            return True
+        time.sleep(0.4)
+    return _running(names)
+
+
+def _existing_path(paths: list[str]) -> str:
+    return _existing(paths)
+
+
+def _install_is_dead(paths: list[str]) -> bool:
+    for path in paths:
+        expanded = os.path.expandvars(path)
+        if not expanded or os.path.isfile(expanded):
+            continue
+        if os.path.isfile(os.path.join(os.path.dirname(expanded), ".dead")):
+            return True
+    return False
+
+
+def _start_program(program: str, arguments: str = "") -> None:
+    command = [program]
+    if arguments:
+        command.extend(arguments.split())
+    subprocess.Popen(command, cwd=os.path.dirname(program) or None)
+
+
+def _launch_failure(name: str, exc: OSError) -> tuple[str, bool]:
+    print(f"[PC] {exc}")
+    if getattr(exc, "winerror", None) == 1223:
+        return f"Windows blocked {name}.", False
+    return f"{name} did not start.", False
+
+
+def _bring_forward(processes: list[str]) -> bool:
+    if not processes:
+        return False
+    return _focus_process(processes[0])
+
+
+def open_result(request: str) -> tuple[str, bool]:
+    """Open an allowlisted app. Return the sentence to speak and whether it worked."""
+    from apps import find_allowed
+
+    entry = find_allowed(request)
+    if entry is None:
+        shown = " ".join(request.split()) or "that"
+        return f"I am not allowed to open {shown}.", False
+    try:
+        return _open_entry(entry)
+    except OSError as exc:
+        return _launch_failure(entry["name"], exc)
+    except Exception as exc:
+        print(f"[PC] {exc}")
+        return f"I could not open {entry['name']}.", False
+
+
+def open_named(request: str) -> bool:
+    """Open an allowlisted app and say whether it actually opened."""
+    message, ok = open_result(request)
+    speak(message)
+    return ok
+
+
+def _open_entry(entry: dict) -> tuple[str, bool]:
+    name = entry["name"]
+    processes = list(entry.get("process") or [])
+    paths = list(entry.get("paths") or [])
+    always_new = any(path.lower().endswith("explorer.exe") for path in paths)
+    if processes and _running(processes) and not always_new:
+        if _bring_forward(processes):
+            return f"{name} is already open.", True
+        return f"{name} is already open, but I could not bring it forward.", True
+
+    program = _existing_path(paths)
+    if program:
+        if always_new:
+            return _open_explorer(name)
+        _start_program(program)
+        expected = processes or [os.path.basename(program)]
+        if _wait_for_process(expected):
+            _bring_forward(expected)
+            return f"Opened {name}.", True
+        return f"{name} did not start.", False
+
+    if paths and _install_is_dead(paths):
+        return f"{name} needs to be reinstalled. Its shortcut is still there, but the program files are gone.", False
+
+    app_id = entry.get("app_id") or ""
+    if app_id:
+        subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{app_id}"])
+        if processes and _wait_for_process(processes, timeout=15):
+            _bring_forward(processes)
+            return f"Opened {name}.", True
+        if not processes:
+            return f"I asked Windows to open {name}, but I could not confirm it started.", False
+        return f"{name} did not start.", False
+
+    target = entry.get("target") or ""
+    kind = entry.get("kind") or ""
+    if target:
+        return _open_catalog_target(name, target, kind, processes)
+
+    if paths:
+        return f"{name} is allowed, but it is not installed.", False
+    return f"{name} is allowed, but I could not find it.", False
+
+
+def _open_explorer(name: str) -> tuple[str, bool]:
+    before = _window_class_count("CabinetWClass")
+    subprocess.Popen(["explorer.exe"])
+    import time
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if _window_class_count("CabinetWClass") > before:
+            return f"Opened {name}.", True
+        time.sleep(0.3)
+    if _window_class_count("CabinetWClass") > before:
+        return f"Opened {name}.", True
+    return f"{name} did not open.", False
+
+
+def _open_catalog_target(name: str, target: str, kind: str, processes: list[str]) -> tuple[str, bool]:
+    if kind == "lnk":
+        program, arguments = _shortcut_target(target)
+        if program and os.path.isfile(program):
+            _start_program(program, arguments)
+            expected = processes or [os.path.basename(program)]
+            if _wait_for_process(expected):
+                _bring_forward(expected)
+                return f"Opened {name}.", True
+            return f"{name} did not start.", False
+        if program and os.path.isfile(os.path.join(os.path.dirname(program), ".dead")):
+            return f"{name} needs to be reinstalled. Its shortcut is still there, but the program files are gone.", False
+        return f"{name} is allowed, but its program files are missing.", False
+    subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{target}"])
+    if processes and _wait_for_process(processes):
+        _bring_forward(processes)
+        return f"Opened {name}.", True
+    return f"I asked Windows to open {name}, but I could not confirm it started.", False
+
+
+def _window_class_count(class_name: str) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    total = 0
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd, _lparam):
+        nonlocal total
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        buf = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, buf, 256)
+        if buf.value == class_name:
+            total += 1
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return total
+
+
+def _focus_process(process_name: str) -> bool:
+    hwnd = _hwnd_for_process(process_name)
+    if not hwnd:
+        return False
+    return _focus_hwnd(hwnd)
+
+
+def _hwnd_for_process(process_name: str) -> int | None:
+    import ctypes
+    from ctypes import wintypes
+
+    import psutil
+
+    wanted = process_name.lower()
+    pids = {
+        proc.info["pid"]
+        for proc in psutil.process_iter(["pid", "name"])
+        if (proc.info["name"] or "").lower() == wanted
+    }
+    if not pids:
+        return None
+    user32 = ctypes.windll.user32
+    matches: list[tuple[int, int]] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd, _lparam):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value not in pids:
+            return True
+        if not user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
+            return True
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        area = max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
+        if user32.IsIconic(hwnd):
+            area += 10_000_000
+        matches.append((area, int(hwnd)))
+        return True
+
+    user32.EnumWindows(callback, 0)
+    if not matches:
+        return None
+    return max(matches)[1]
 
 
 def _close_app(mac_app: str, win_exe: str = "") -> None:
@@ -202,6 +561,142 @@ def opera():
         ],
     )
 
+def _spotify_hwnd() -> int | None:
+    """Largest visible Spotify window, including the minimized player."""
+    import ctypes
+    from ctypes import wintypes
+
+    import psutil
+
+    pids = {
+        proc.info["pid"]
+        for proc in psutil.process_iter(["pid", "name"])
+        if (proc.info["name"] or "").lower() == "spotify.exe"
+    }
+    if not pids:
+        return None
+
+    user32 = ctypes.windll.user32
+    matches: list[tuple[int, int]] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd, _lparam):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value not in pids:
+            return True
+        if not user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        area = max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
+        if user32.IsIconic(hwnd):
+            area += 10_000_000
+        matches.append((area, int(hwnd)))
+        return True
+
+    user32.EnumWindows(callback, 0)
+    if not matches:
+        return None
+    return max(matches)[1]
+
+
+def _window_title(hwnd: int) -> str:
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    length = user32.GetWindowTextLengthW(hwnd)
+    if length <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value.strip()
+
+
+def spotify_track() -> str:
+    """Artist and song from Spotify's window, without bringing Spotify forward."""
+    hwnd = _spotify_hwnd()
+    if not hwnd:
+        return ""
+    title = _window_title(hwnd)
+    if not title or title.lower() in {"spotify", "spotify free", "spotify premium"}:
+        return ""
+    return title
+
+
+def _focus_hwnd(hwnd: int) -> bool:
+    """Bring a window forward even when JARVIS currently has the keyboard."""
+    import ctypes
+    import time
+
+    user32 = ctypes.windll.user32
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)
+    user32.keybd_event(0x12, 0, 0, 0)  # Alt lets Windows accept the focus change
+    time.sleep(0.05)
+    user32.SwitchToThisWindow(hwnd, True)
+    user32.SetForegroundWindow(hwnd)
+    user32.BringWindowToTop(hwnd)
+    time.sleep(0.1)
+    user32.keybd_event(0x12, 0, 2, 0)
+    time.sleep(0.15)
+    return user32.GetForegroundWindow() == hwnd
+
+
+def _chord(*keys: int) -> None:
+    import ctypes
+    import time
+
+    user32 = ctypes.windll.user32
+    for key in keys:
+        user32.keybd_event(key, 0, 0, 0)
+        time.sleep(0.02)
+    for key in reversed(keys):
+        user32.keybd_event(key, 0, 2, 0)
+        time.sleep(0.02)
+
+
+def _copy_text(text: str) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    if not user32.OpenClipboard(None):
+        return False
+    try:
+        user32.EmptyClipboard()
+        data = (text + "\0").encode("utf-16-le")
+        handle = kernel32.GlobalAlloc(0x0002, len(data))
+        if not handle:
+            return False
+        locked = kernel32.GlobalLock(handle)
+        if not locked:
+            kernel32.GlobalFree(handle)
+            return False
+        ctypes.memmove(locked, data, len(data))
+        kernel32.GlobalUnlock(handle)
+        if not user32.SetClipboardData(13, handle):
+            kernel32.GlobalFree(handle)
+            return False
+        return True
+    except Exception:
+        return False
+    finally:
+        user32.CloseClipboard()
+
+
 def _spotify_window():
     """Return the main Spotify window, including while a song title is showing."""
     import ctypes
@@ -251,73 +746,105 @@ def _spotify_window():
 
 
 def spotify():
-    if not IS_MAC:
-        if _spotify_window() is not None:
-            speak("Spotify is already open")
-            return
-        app_id = os.environ.get("JARVIS_SPOTIFY_APPID", "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify")
-        subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{app_id}"])
-        speak("Opening Spotify")
-        return
-    _open_app("Spotify", extra=[r"%AppData%\Spotify\Spotify.exe"])
+    open_named("spotify")
 
 
 def resume_playback():
-    """Toggle the system play control, which resumes Spotify when it is the active player."""
-    import ctypes
+    """Resume the current media session and say what actually happened."""
+    from playback import media_play
 
-    code = 0xB3  # VK_MEDIA_PLAY_PAUSE
-    ctypes.windll.user32.keybd_event(code, 0, 0, 0)
-    ctypes.windll.user32.keybd_event(code, 0, 2, 0)
-    speak("Playing")
+    speak(media_play())
 
 
-def play_spotify_song(title: str) -> None:
-    """Search Spotify and play the top result."""
+def _launch_spotify() -> None:
+    app_id = os.environ.get("JARVIS_SPOTIFY_APPID", "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify")
+    subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{app_id}"])
+
+
+def play_spotify_song(title: str) -> str:
+    """Search Spotify and report the track that actually started."""
+    try:
+        return _play_spotify_song(title)
+    except Exception as exc:
+        print(f"[PC] {exc}")
+        return f"I could not start {title}."
+
+
+def _play_spotify_song(title: str) -> str:
     import time
 
-    import pyautogui
+    from playback import matches_request, media_status, track_label
 
-    window = _spotify_window()
-    if window is None:
-        app_id = os.environ.get("JARVIS_SPOTIFY_APPID", "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify")
-        subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{app_id}"])
-        for _ in range(12):
+    current = media_status()
+    if matches_request(title, current) and current.get("status") == "playing":
+        label = track_label(current)
+        source = current.get("source") or ""
+        if source and source.lower() not in label.lower():
+            return f"Already playing {label} on {source}."
+        return f"Already playing {label}."
+
+    hwnd = _spotify_hwnd()
+    launched = hwnd is None
+    if launched:
+        _launch_spotify()
+        for _ in range(40):
             time.sleep(0.5)
-            window = _spotify_window()
-            if window is not None:
+            hwnd = _spotify_hwnd()
+            if hwnd is not None:
                 break
-    if window is None:
-        speak("I could not find Spotify.")
-        return
+    if hwnd is None:
+        return "I could not find Spotify."
+    if launched:
+        time.sleep(2)
 
-    try:
-        if window.isMinimized:
-            window.restore()
-            time.sleep(0.3)
-        window.maximize()
-        window.activate()
-    except Exception as exc:
-        print(f"[Spotify] Could not focus the window: {exc}")
+    focused = False
+    for _ in range(5):
+        if _focus_hwnd(hwnd):
+            focused = True
+            break
+        time.sleep(0.3)
+    if not focused:
+        return "Spotify is open, but I could not control its window."
 
-    time.sleep(0.6)
-    pyautogui.hotkey("ctrl", "k")
     time.sleep(0.4)
-    pyautogui.hotkey("ctrl", "a")
-    typed = False
-    try:
-        import pyperclip
+    _chord(0x11, 0x4B)  # Ctrl+K, Spotify search
+    time.sleep(0.5)
+    _chord(0x11, 0x41)  # Ctrl+A
+    time.sleep(0.1)
+    if _copy_text(title):
+        _chord(0x11, 0x56)  # Ctrl+V
+    else:
+        import pyautogui
 
-        pyperclip.copy(title)
-        pyautogui.hotkey("ctrl", "v")
-        typed = True
-    except Exception:
-        typed = False
-    if not typed:
-        pyautogui.typewrite(title, interval=0.02)
-    time.sleep(1.6)
-    pyautogui.hotkey("shift", "enter")
-    speak(f"Playing {title} on Spotify")
+        pyautogui.typewrite(title, interval=0.03)
+    time.sleep(1.8)
+    _chord(0x10, 0x0D)  # Shift+Enter plays the top result
+    time.sleep(0.6)
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    user32.ShowWindow(hwnd, 6)  # keep Spotify in the background
+    jarvis = user32.FindWindowW(None, "J.A.R.V.I.S")
+    if jarvis:
+        _focus_hwnd(jarvis)
+
+    latest = current
+    for _ in range(4):
+        latest = media_status()
+        if matches_request(title, latest) and latest.get("status") == "playing":
+            break
+        time.sleep(0.8)
+    label = track_label(latest)
+    if matches_request(title, latest) and latest.get("status") == "playing":
+        source = latest.get("source") or ""
+        if source:
+            return f"Playing {label} on {source}."
+        return f"Playing {label}."
+    if matches_request(title, latest):
+        return f"Spotify found {label}, but it is not playing."
+    if label and label != track_label(current):
+        return f"That did not start. The current track is {label}."
+    return f"I could not start {title}."
 
 def open_virtual_box():
 

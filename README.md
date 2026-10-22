@@ -69,15 +69,14 @@ pip install -r requirements.txt
 python jarvis.py
 ```
 
-Type a command and press Enter. JARVIS answers out loud and prints the same line on screen. Try `help`, `what time is it`, `weather in London`, or `open notepad`.
+A window opens. Type a command and press Enter, or click Listen and speak. JARVIS answers out loud and writes the same line in the window. Try `help`, `what time is it`, `weather in London`, or `open notepad`.
 
-Voice input:
+The terminal version is still available:
 
 ```bash
+python jarvis.py --cli
 python jarvis.py --voice
 ```
-
-If the microphone is unavailable, type the command instead.
 
 Chat and weather keys live in a `.env` file (see `.env.example`). They are not written in the Python files.
 

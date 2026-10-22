@@ -13,6 +13,7 @@ import threading
 from typing import Optional
 
 _lock = threading.Lock()
+_listeners: list = []
 _current_speech_thread: Optional[threading.Thread] = None
 _speech_process: Optional[subprocess.Popen] = None
 _stop_requested = False
@@ -109,6 +110,25 @@ def _speech_worker(text: str) -> None:
         _remaining_text = ""
 
 
+def publish(text: str) -> None:
+    """Send a line to the screen without speaking it."""
+    print(text)
+    _notify(text)
+
+
+def _notify(text: str) -> None:
+    for listener in list(_listeners):
+        try:
+            listener(text)
+        except Exception as exc:
+            print(f"[UI] {exc}")
+
+
+def add_listener(listener) -> None:
+    """Register a function called with each spoken or published line."""
+    _listeners.append(listener)
+
+
 def speak(audio: object, blocking: bool = True) -> None:
     """Speak text. Always prints the line so the conversation is visible."""
     global _current_speech_thread
@@ -122,6 +142,7 @@ def speak(audio: object, blocking: bool = True) -> None:
         return
 
     print(f"JARVIS: {text}")
+    _notify(text)
     if _muted():
         return
 

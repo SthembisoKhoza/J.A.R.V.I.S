@@ -1,0 +1,154 @@
+{
+  "apps": [
+    {
+      "name": "Spotify",
+      "match": [
+        "spotify"
+      ],
+      "process": [
+        "Spotify.exe"
+      ],
+      "paths": [],
+      "app_id": "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"
+    },
+    {
+      "name": "Notepad",
+      "match": [
+        "notepad"
+      ],
+      "process": [
+        "notepad.exe"
+      ],
+      "paths": [
+        "C:\\Windows\\System32\\notepad.exe"
+      ]
+    },
+    {
+      "name": "Calculator",
+      "match": [
+        "calculator",
+        "calc"
+      ],
+      "process": [
+        "CalculatorApp.exe",
+        "calc.exe"
+      ],
+      "paths": [
+        "calc.exe"
+      ]
+    },
+    {
+      "name": "File Explorer",
+      "match": [
+        "file explorer",
+        "explorer",
+        "files"
+      ],
+      "process": [
+        "explorer.exe"
+      ],
+      "paths": [
+        "explorer.exe"
+      ]
+    },
+    {
+      "name": "Microsoft Edge",
+      "match": [
+        "microsoft edge",
+        "edge",
+        "browser"
+      ],
+      "process": [
+        "msedge.exe"
+      ],
+      "paths": [
+        "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe",
+        "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe"
+      ]
+    },
+    {
+      "name": "Google Chrome",
+      "match": [
+        "google chrome",
+        "chrome"
+      ],
+      "process": [
+        "chrome.exe"
+      ],
+      "paths": [
+        "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe",
+        "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe",
+        "%LocalAppData%\\Google\\Chrome\\Application\\chrome.exe"
+      ]
+    },
+    {
+      "name": "Discord",
+      "match": [
+        "discord"
+      ],
+      "process": [
+        "Discord.exe"
+      ],
+      "paths": [
+        "%LocalAppData%\\Discord\\Discord.exe"
+      ]
+    },
+    {
+      "name": "Visual Studio Code",
+      "match": [
+        "visual studio code",
+        "vs code",
+        "vscode",
+        "code"
+      ],
+      "process": [
+        "Code.exe"
+      ],
+      "paths": [
+        "%LocalAppData%\\Programs\\Microsoft VS Code\\Code.exe",
+        "%ProgramFiles%\\Microsoft VS Code\\Code.exe"
+      ]
+    },
+    {
+      "name": "Task Manager",
+      "match": [
+        "task manager",
+        "taskmanager"
+      ],
+      "process": [
+        "Taskmgr.exe"
+      ],
+      "paths": [
+        "taskmgr.exe"
+      ]
+    },
+    {
+      "name": "Outlook",
+      "match": [
+        "outlook",
+        "email",
+        "emails",
+        "e-mail",
+        "inbox",
+        "mail"
+      ],
+      "process": [
+        "olk.exe"
+      ],
+      "paths": [],
+      "app_id": "Microsoft.OutlookForWindows_8wekyb3d8bbwe!Microsoft.OutlookforWindows"
+    },
+    {
+      "name": "WhatsApp",
+      "match": [
+        "whatsapp",
+        "whats app"
+      ],
+      "process": [
+        "WhatsApp.Root.exe"
+      ],
+      "paths": [],
+      "app_id": "5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App"
+    }
+  ]
+}

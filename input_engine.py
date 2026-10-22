@@ -9,6 +9,13 @@ from __future__ import annotations
 import os
 
 _voice_failed = False
+_command_queue = None
+
+
+def use_queue(queue) -> None:
+    """Take commands from a queue instead of the terminal."""
+    global _command_queue
+    _command_queue = queue
 
 
 def _record_phrase(timeout: float = 6, phrase_limit: float = 12) -> bytes:
@@ -85,8 +92,34 @@ def _listen_voice() -> str:
         return ""
 
 
+def voice_link() -> str:
+    """ON when a microphone and the speech library are available."""
+    if _voice_failed:
+        return "OFF"
+    try:
+        import sounddevice as sd
+        import speech_recognition  # noqa: F401
+
+        devices = sd.query_devices()
+    except Exception:
+        return "OFF"
+    if isinstance(devices, dict):
+        devices = [devices]
+    for device in devices:
+        try:
+            if int(device.get("max_input_channels") or 0) > 0:
+                return "ON"
+        except Exception:
+            continue
+    return "OFF"
+
+
 def listen() -> str:
     """Return the next command, or 'none' when nothing was captured."""
+    if _command_queue is not None:
+        command = _command_queue.get()
+        return (command or "none").strip() or "none"
+
     if os.environ.get("JARVIS_INPUT", "text") == "voice":
         heard = _listen_voice()
         if heard:

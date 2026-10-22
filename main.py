@@ -23,7 +23,7 @@ def WishMe():
         greeting = "Good afternoon"
     else:
         greeting = "Good evening"
-    speak(now.strftime(f"{greeting}. It is %I:%M %p on %A, %B %d. JARVIS is online."))
+    speak(now.strftime(f"{greeting}, sir. It is %I:%M %p on %A, %B %d. JARVIS is online."))
 
 
 def screenshot(name: str | None = None):
